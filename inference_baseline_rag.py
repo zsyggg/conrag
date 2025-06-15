@@ -26,21 +26,27 @@ TASK_INST = {
 control_tokens = ["[Fully supported]", "[Partially supported]", "[No support / Contradictory]", "[No Retrieval]", "[Retrieval]",
                   "[Irrelevant]", "[Relevant]", "<paragraph>", "</paragraph>", "[Utility:1]", "[Utility:2]", "[Utility:3]", "[Utility:4]", "[Utility:5]"]
 
+# Note: Retrieval passages are intentionally omitted from prompts in this
+# baseline to reduce noise and rely solely on consensus summaries.
+
 def format_baseline_prompt(item_index, task, query, consensus_text, original_passages_list, choices_data=None):
-    task_specific_instruction = TASK_INST.get(task, "Please answer the following question accurately and comprehensively based on the provided context.")
+    """Create the prompt for the baseline RAG method.
+
+    The new behaviour drops the raw retrieved passages from the prompt to reduce
+    noise. Only the consensus text is kept as supporting context.  The function
+    signature is kept for compatibility but ``original_passages_list`` is now
+    ignored.
+    """
+
+    task_specific_instruction = TASK_INST.get(
+        task,
+        "Please answer the following question accurately and comprehensively based on the provided context."
+    )
     
     # ARC Challenge 特殊处理 - 使用CRAG风格
     if task.lower() == "arc_challenge":
-        # 1. 准备文档
-        documents = ""
-        if original_passages_list and any(p.strip() for p in original_passages_list):
-            # 只使用前3个文档，避免过长
-            valid_passages = [p.strip() for p in original_passages_list if p.strip()][:3]
-            documents = ' '.join(valid_passages)
-        elif consensus_text and consensus_text.strip() and consensus_text != "Not available.":
-            documents = consensus_text
-        else:
-            documents = "No relevant documents found."
+        # Only keep the consensus text. Retrieved passages are ignored.
+        documents = consensus_text if consensus_text and consensus_text.strip() and consensus_text != "Not available." else "No relevant documents found."
         
         # 2. 格式化选项
         choices_str = format_arc_choices_for_prompt(choices_data) if choices_data else ""
@@ -50,10 +56,10 @@ def format_baseline_prompt(item_index, task, query, consensus_text, original_pas
             # 返回一个基本的prompt
             return f"Question: {query}\nAnswer with A, B, C, or D:"
         
-        # 3. CRAG风格的prompt
+        # 3. CRAG风格的prompt (retrieval text removed)
         prompt = (
-            f"Refer to the following documents, follow the instruction and answer the question.\n\n"
-            f"Documents: {documents}\n"
+            f"Answer the multiple-choice question below based only on the provided consensus.\n\n"
+            f"Consensus: {documents}\n"
             f"Question: {query}\n\n"
             f"Instruction: Given four answer candidates, A, B, C and D, choose the best answer choice.\n"
             f"Choices:{choices_str}"
@@ -64,19 +70,17 @@ def format_baseline_prompt(item_index, task, query, consensus_text, original_pas
     # 其他任务的处理保持原样
     else:
         user_question = query
-        original_context_str = "\n\n".join(original_passages_list) if original_passages_list else "Not available."
+        # Retrieved passages are ignored for denoising purposes
         consensus_text_str = consensus_text if consensus_text else "Not available."
         
         how_to_answer_instruction_baseline = (
-            "Your task is to answer the user's question based on the provided information.\n"
-            "Use \"Consensus\" and \"Original Retrieved Documents\" as your primary sources."
+            "Your task is to answer the user's question based on the provided consensus information only."
         )
         
         prompt_parts = [
             f"{task_specific_instruction}\n\n",
             f"Question: {user_question}\n\n",
             f"### Contextual Information Provided:\n\n",
-            f"#### Original Retrieved Documents:\n{original_context_str}\n\n",
             f"#### Consensus:\n{consensus_text_str}\n\n",
             f"### Instructions for Answering:\n{how_to_answer_instruction_baseline}\n\n",
             f"### Answer:\n"
