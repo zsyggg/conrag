@@ -35,58 +35,82 @@ def generate_t5_consensus(model, tokenizer, query, passages_list, device, max_le
     consensus_text = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
     return consensus_text
 
-def find_additional_evidence(st_model, query, consensus_text, all_doc_sentences, top_n=2, penalty_lambda=0.7):
-    """
-    寻找额外证据的核心逻辑优化版本。
+def find_additional_evidence(
+    st_model,
+    query,
+    consensus_text,
+    all_doc_sentences,
+    top_n=2,
+    penalty_lambda=0.7,
+    redundancy_threshold=0.8,
+):
+    """从文档中筛选与查询强相关且与共识正交的句子。
 
     Args:
         st_model: SentenceTransformer 模型。
         query (str): 用户问题。
-        consensus_text (str): T5 生成的共识。
-        all_doc_sentences (list of str): 从所有文档中提取的句子列表。
-        top_n (int): 需要返回的证据数量。
-        penalty_lambda (float): 对与共识相似的句子的惩罚权重。
+        consensus_text (str): 生成的共识摘要。
+        all_doc_sentences (list[str]): 候选句子列表。
+        top_n (int): 返回的证据数量。
+        penalty_lambda (float): 与共识相似度的惩罚权重。
+        redundancy_threshold (float): 证据之间相似度超过该阈值时视为冗余。
 
     Returns:
-        list of str: 额外的证据句子列表。
+        list[str]: 额外证据句子列表。
     """
+
     if not all_doc_sentences:
         return []
 
-    # 1. 计算所有句子相对于 query 和 consensus 的嵌入
-    query_embedding = st_model.encode(query, convert_to_tensor=True, show_progress_bar=False)
-    consensus_embedding = st_model.encode(consensus_text, convert_to_tensor=True, show_progress_bar=False)
-    doc_embeddings = st_model.encode(all_doc_sentences, convert_to_tensor=True, show_progress_bar=False)
+    # --- 计算嵌入 ---
+    query_emb = st_model.encode(query, convert_to_tensor=True, show_progress_bar=False)
+    consensus_sentences = regex_split_into_sentences(consensus_text)
+    if consensus_sentences:
+        consensus_embs = st_model.encode(consensus_sentences, convert_to_tensor=True, show_progress_bar=False)
+    else:
+        consensus_embs = None
+    candidate_embs = st_model.encode(all_doc_sentences, convert_to_tensor=True, show_progress_bar=False)
 
-    # 2. 计算相似度得分
-    # (N, 1) 张量，其中 N 是文档句子的数量
-    query_similarities = util.pytorch_cos_sim(doc_embeddings, query_embedding)
-    # (N, 1) 张量
-    consensus_similarities = util.pytorch_cos_sim(doc_embeddings, consensus_embedding)
+    # --- 计算与查询的相关性 ---
+    query_sims = util.pytorch_cos_sim(candidate_embs, query_emb).squeeze()
 
-    # 3. 计算最终得分
-    # 核心思想：最终得分 = 与问题的相关性 - 对与共识相似性的惩罚
-    # 我们希望与问题相关度高，与共识相似度低的句子得分更高
-    final_scores = query_similarities - penalty_lambda * consensus_similarities
-    
-    # 4. 排序并选出 Top N
-    # 将得分展平以便排序
-    final_scores_flat = final_scores.flatten()
-    # 获取得分最高的 top_n+1 个索引（多选一个以防最相关的就是共识本身）
-    top_indices = torch.topk(final_scores_flat, k=min(top_n + 1, len(all_doc_sentences)), sorted=True).indices
+    # --- 计算与共识的最大相似度 ---
+    if consensus_embs is not None:
+        # 对每个候选句子，取其与所有共识句子的最大相似度
+        consensus_sims = util.pytorch_cos_sim(candidate_embs, consensus_embs).max(dim=1).values
+    else:
+        consensus_sims = torch.zeros(len(all_doc_sentences), device=candidate_embs.device)
 
-    # 5. 组装证据，并进行简单的冗余检查
-    additional_evidence = []
-    consensus_norm = consensus_text.strip().lower()
-    for index in top_indices:
-        sentence = all_doc_sentences[index.item()]
-        # 避免将与共识完全相同的句子作为证据
-        if sentence.strip().lower() != consensus_norm and sentence not in additional_evidence:
-            additional_evidence.append(sentence)
-        if len(additional_evidence) >= top_n:
+    # --- 综合得分 ---
+    scores = query_sims - penalty_lambda * consensus_sims
+
+    # --- 根据得分排序 ---
+    ranked_indices = torch.argsort(scores, descending=True)
+
+    selected_sentences = []
+    selected_embs = []
+    for idx in ranked_indices:
+        sentence = all_doc_sentences[idx]
+        if sentence.strip() == "":
+            continue
+        # 与共识完全相同则跳过
+        if consensus_sentences and sentence.strip().lower() in (s.lower() for s in consensus_sentences):
+            continue
+
+        emb = candidate_embs[idx]
+
+        # 与已选择证据的相似度检查，确保正交
+        if selected_embs:
+            redundancy = util.pytorch_cos_sim(emb, torch.stack(selected_embs)).max().item()
+            if redundancy >= redundancy_threshold:
+                continue
+
+        selected_sentences.append(sentence)
+        selected_embs.append(emb)
+        if len(selected_sentences) >= top_n:
             break
-            
-    return additional_evidence
+
+    return selected_sentences
 
 
 def main():
