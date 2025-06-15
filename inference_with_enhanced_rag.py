@@ -30,22 +30,25 @@ TASK_INST = {
 control_tokens = ["[Fully supported]", "[Partially supported]", "[No support / Contradictory]", "[No Retrieval]", "[Retrieval]",
                   "[Irrelevant]", "[Relevant]", "<paragraph>", "</paragraph>", "[Utility:1]", "[Utility:2]", "[Utility:3]", "[Utility:4]", "[Utility:5]"]
 
+# Prompts in this script intentionally exclude raw retrieval passages and any
+# additional evidence to minimise noise.
+
 def format_enhanced_prompt(item_index, task, query, consensus_text, additional_evidence_list, original_passages_list, choices_data=None):
-    """
-    为增强RAG生成优化的prompt。
-    这个版本只使用 consensus 和 additional_evidence，不再包含 original_passages_list。
+    """Create the prompt for the enhanced RAG method.
+
+    Retrieval passages and additional evidence are omitted from the prompt to
+    reduce noise. Only the consensus summary is used as supporting context.  The
+    parameters ``additional_evidence_list`` and ``original_passages_list`` are
+    kept for API compatibility but ignored here.
     """
     system_intro = "You are a helpful and precise assistant. Your task is to answer the following question based on the provided context. Be critical and verify information."
 
     # --- 针对 ARC Challenge 的特殊、严格的Prompt ---
     if task.lower() == "arc_challenge":
+        # Only include the consensus text. Additional evidence is ignored.
         context_parts = []
         if consensus_text and consensus_text.strip() and consensus_text != "Not available.":
             context_parts.append(f"- [Consensus]: {consensus_text}")
-        if additional_evidence_list and any(e.strip() for e in additional_evidence_list):
-            evidence_str = " ".join([e.strip() for e in additional_evidence_list if e.strip()])
-            context_parts.append(f"- [Additional Evidence]: {evidence_str}")
-        # 不再 fallback 到 original_passages_list
         context_str = "\n".join(context_parts) if context_parts else "No relevant context found."
         choices_str = format_arc_choices_for_prompt(choices_data) if choices_data else ""
         if not choices_str:
@@ -73,15 +76,13 @@ def format_enhanced_prompt(item_index, task, query, consensus_text, additional_e
     # --- 针对其他任务的通用增强Prompt ---
     else:
         consensus_str = consensus_text if consensus_text else "Not available."
-        evidence_str = "\n".join(additional_evidence_list) if additional_evidence_list else "Not available."
         prompt_parts = [
             f"{system_intro}\n\n",
             f"### Question:\n{query}\n\n",
             f"### Context:\n",
             f"#### Consensus:\n{consensus_str}\n\n",
-            f"#### Additional Evidence (For more details):\n{evidence_str}\n\n",
             f"### Instruction:\n"
-            f"Based on the 'Consensus' and 'Additional Evidence', provide a direct and comprehensive answer to the question.\n\n",
+            f"Based on the provided consensus, provide a direct and comprehensive answer to the question.\n\n",
             f"### Answer:\n"
         ]
         return "".join(prompt_parts)
